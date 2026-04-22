@@ -2,7 +2,7 @@
   "name": "god-analyzer-ui",
   "version": "1.0.0",
   "private": true,
-  "homepage": ".",
+  "homepage": "https://AngelTech90.github.io/Accountability-dashboard-p2p",
   "dependencies": {
     "ajv": "^8.18.0",
     "chart.js": "^4.4.1",
@@ -22,7 +22,7 @@
     "deploy": "gh-pages -d build"
   },
   "devDependencies": {
-    "gh-pages": "^6.1.1"
+    "gh-pages": "^6.3.0"
   },
   "eslintConfig": {
     "extends": [

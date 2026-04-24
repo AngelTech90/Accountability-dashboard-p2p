@@ -1,5 +1,12 @@
 import React, { useState, useMemo } from 'react';
-import { emptyOrder, computeCommission, formatVES } from '../utils/expediente';
+import { emptyOrder, formatVES } from '../utils/expediente';
+
+function computeCommission(order) {
+  const base = 0.0025;
+  const pmExtra = 0.003;
+  if (order.order_type === 'sell') return order.usdt_amount * base;
+  return order.usdt_amount * (base + (order.is_pago_movil ? pmExtra : 0));
+}
 
 function OrderModal({ order, onSave, onClose }) {
   const [form, setForm] = useState({ ...order });

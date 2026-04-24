@@ -54,7 +54,9 @@ export default function Calculator() {
   // Driven by the same inputs above + commType toggle
   const [commUSDT, setCommUSDT]   = useState(100);
   const [commType, setCommType]   = useState('buy');
-  const [commPM, setCommPM]       = useState(true);
+  const [commPM, setCommPM]         = useState(true);
+  const [commDirect, setCommDirect] = useState(false);
+  const [commManual, setCommManual] = useState(-1);
 
   // Profile calculator
   const [currentOrders, setCurrentOrders]     = useState(150);
@@ -76,10 +78,21 @@ export default function Calculator() {
   }, [capital, sellRate, buyRate, cyclesPerDay, isPm]);
 
   const commCalc = useMemo(() => {
-    const rate = commType === 'buy' ? 0.0025 + (commPM ? 0.003 : 0) : 0.0025;
+    let rate;
+    if (commManual >= 0) {
+      // manual override: user typed a fixed commission amount
+      return { rate: commUSDT > 0 ? commManual / commUSDT : 0, comm: commManual, net: commUSDT - commManual };
+    }
+    if (commType === 'sell' && commDirect) {
+      rate = 0; // Venta directa = 0% commission
+    } else if (commType === 'buy') {
+      rate = 0.0025 + (commPM ? 0.003 : 0);
+    } else {
+      rate = 0.0025;
+    }
     const comm = commUSDT * rate;
     return { rate, comm, net: commUSDT - comm };
-  }, [commUSDT, commType, commPM]);
+  }, [commUSDT, commType, commPM, commDirect, commManual]);
 
   const profileCalc = useMemo(() => {
     const ordersGap    = targetOrders - currentOrders;
@@ -162,16 +175,40 @@ export default function Calculator() {
                 <div style={{ flex: 1 }}>
                   <div className="form-group" style={{ marginBottom: 0 }}>
                     <label className="form-label">Tipo</label>
-                    <select className="form-select" value={commType} onChange={e => setCommType(e.target.value)}>
+                    <select className="form-select" value={commType} onChange={e => { setCommType(e.target.value); setCommDirect(false); }}>
                       <option value="buy">Compra</option>
                       <option value="sell">Venta</option>
                     </select>
                   </div>
                 </div>
               </div>
-              <div className="checkbox-row" style={{ marginBottom: 12 }}>
-                <input type="checkbox" id="comm-pm" checked={commPM} onChange={e => setCommPM(e.target.checked)} disabled={commType === 'sell'} />
-                <label htmlFor="comm-pm" style={{ fontSize: 11 }}>Pago Móvil (+0.30%)</label>
+              {commType === 'buy' && (
+                <div className="checkbox-row" style={{ marginBottom: 8 }}>
+                  <input type="checkbox" id="comm-pm" checked={commPM} onChange={e => setCommPM(e.target.checked)} />
+                  <label htmlFor="comm-pm" style={{ fontSize: 11 }}>Pago Móvil (+0.30%)</label>
+                </div>
+              )}
+              {commType === 'sell' && (
+                <div className="checkbox-row" style={{ marginBottom: 8 }}>
+                  <input type="checkbox" id="comm-direct" checked={commDirect} onChange={e => setCommDirect(e.target.checked)} />
+                  <label htmlFor="comm-direct" style={{ fontSize: 11, color: 'var(--green)' }}>Venta Directa (0% comisión)</label>
+                </div>
+              )}
+              <div style={{ marginBottom: 8 }}>
+                <label className="form-label" style={{ display:'block', marginBottom: 4 }}>
+                  Comisión Manual (USDT)
+                  <span style={{ color:'var(--text-3)', marginLeft:6, fontWeight:400 }}>— deja vacío para auto</span>
+                </label>
+                <input
+                  className="form-input"
+                  type="number" step="0.0001" min="0"
+                  placeholder={`auto: ${(commUSDT * (commCalc.rate||0)).toFixed(4)}`}
+                  value={commManual >= 0 ? commManual : ''}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setCommManual(v === '' ? -1 : Math.max(0, parseFloat(v) || 0));
+                  }}
+                />
               </div>
             </div>
             <ResultRow label={`Tasa ${(commCalc.rate * 100).toFixed(3)}%`} value={`−${commCalc.comm.toFixed(4)} USDT`} accent="var(--red)" />

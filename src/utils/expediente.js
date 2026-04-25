@@ -98,27 +98,53 @@ export function computeCycles(orders) {
       const bt = new Date(b.created_at);
       return bt >= st && bt < nt;
     });
-    const totalBought    = cycleBuys.reduce((s,b) => s + b.usdt_amount, 0);
-    const coverage_pct   = sell.usdt_amount > 0 ? Math.min(totalBought / sell.usdt_amount, 1) * 100 : 0;
-    const sellRevenue    = sell.usdt_amount * sell.unit_price;
-    const buyCost        = cycleBuys.reduce((s,b) => s + b.usdt_amount * b.unit_price, 0);
-    const sellComm       = sell.usdt_amount * 0.0025;
-    const buyComm        = cycleBuys.reduce((s,b) => s + b.usdt_amount * (0.0025 + (b.is_pago_movil ? 0.003 : 0)), 0);
-    const profit_usdt    = sell.usdt_amount - totalBought - sellComm - buyComm;
-    const profit_ves     = sellRevenue - buyCost;
+    const totalBought  = cycleBuys.reduce((s,b) => s + b.usdt_amount, 0);
+    const coverage_pct = sell.usdt_amount > 0 ? Math.min(totalBought / sell.usdt_amount, 1) * 100 : 0;
+
+    // Effective sell price after sell commission
+    const sellCommRate = sell.is_direct ? 0 : 0.0025;
+    const eff_sell     = sell.unit_price * (1 - sellCommRate);
+    const sellComm     = sell.usdt_amount * sellCommRate;
+
+    // Per-buy profit: qty × (eff_sell - eff_buy) / sell_price
+    // eff_buy = buy_price × (1 + buy_comm_rate)
+    // This gives profit in USDT for each buy order in this cycle
+    const per_order_profit = cycleBuys.map(b => {
+      const buyCommRate  = 0.0025 + (b.is_pago_movil ? 0.003 : 0);
+      const eff_buy      = b.unit_price * (1 + buyCommRate);
+      const profit_usdt  = b.usdt_amount * (eff_sell - eff_buy) / sell.unit_price;
+      const profit_ves   = b.usdt_amount * (sell.unit_price - b.unit_price);
+      const profit_pct   = (eff_sell / eff_buy - 1) * 100;
+      const buyComm      = b.usdt_amount * buyCommRate;
+      return {
+        order_uid:   b.order_number || b.id,
+        usdt_amount: b.usdt_amount,
+        buy_price:   b.unit_price,
+        profit_usdt: parseFloat(profit_usdt.toFixed(4)),
+        profit_ves:  parseFloat(profit_ves.toFixed(2)),
+        profit_pct:  parseFloat(profit_pct.toFixed(3)),
+        buy_commission: parseFloat(buyComm.toFixed(4)),
+      };
+    });
+
+    // Total profit = sum of per-buy profits (no capital subtraction)
+    const profit_usdt  = per_order_profit.reduce((s,p) => s + p.profit_usdt, 0);
+    const profit_ves   = per_order_profit.reduce((s,p) => s + p.profit_ves,  0);
+    const buyComm      = per_order_profit.reduce((s,p) => s + p.buy_commission, 0);
+
     return {
       cycle_id:        i + 1,
       sell_order:      sell.order_number || sell.id,
       buy_orders:      cycleBuys.map(b => b.order_number || b.id),
-      per_order_profit:[],
+      per_order_profit,
       sell_usdt:       sell.usdt_amount,
       sell_price:      sell.unit_price,
       total_bought:    totalBought,
       coverage_pct,
-      profit_usdt,
-      profit_ves,
-      sell_commission: sellComm,
-      buy_commission:  buyComm,
+      profit_usdt:     parseFloat(profit_usdt.toFixed(4)),
+      profit_ves:      parseFloat(profit_ves.toFixed(2)),
+      sell_commission: parseFloat(sellComm.toFixed(4)),
+      buy_commission:  parseFloat(buyComm.toFixed(4)),
       is_partial:      coverage_pct < 99,
       completed_at:    sell.created_at,
       note:            null,
@@ -236,21 +262,20 @@ export function parseCSV(text) {
     // Sell < 50 USDT → expense
     const is_expense = order_type === 'sell' && usdt_amount < 50;
 
-    // Find best commission column (prefer non-empty)
+    // Commission: use whichever commission column has a value
     let commission_usdt = 0;
-    for (const ci of [COL.commission]) {
-      if (ci >= 0 && cols[ci]?.trim()) {
-        commission_usdt = parseFloat(cols[ci]) || 0;
-        break;
-      }
-    }
-    // Also check any col with "comisión" or "tarifa"
     for (let j = 0; j < headers.length; j++) {
       if (/comis|tarifa/i.test(headers[j]) && cols[j]?.trim()) {
-        commission_usdt = parseFloat(cols[j]) || 0;
-        break;
+        const v = parseFloat(cols[j]);
+        if (!isNaN(v) && v > 0) { commission_usdt = v; break; }
       }
     }
+
+    // Pago Móvil detection from CSV: if commission rate > 0.40% it's PM
+    // Base buy rate = 0.25%, PM rate = 0.55% (+0.30%)
+    // No payment_method column exists in Binance CSV export
+    const comm_rate = usdt_amount > 0 ? (commission_usdt / usdt_amount) : 0;
+    const is_pago_movil = order_type === 'buy' && comm_rate > 0.004; // 0.4% threshold
 
     orders.push(normalizeOrder({
       order_number:   COL.order_number >= 0 ? cols[COL.order_number]?.trim() : '',
@@ -259,6 +284,7 @@ export function parseCSV(text) {
       fiat_amount:    COL.fiat_amount  >= 0 ? parseFloat(cols[COL.fiat_amount])  || 0 : 0,
       unit_price:     COL.unit_price   >= 0 ? parseFloat(cols[COL.unit_price])   || 0 : 0,
       commission_usdt,
+      is_pago_movil,
       counterparty:   COL.counterparty >= 0 ? cols[COL.counterparty]?.trim() : '',
       is_expense,
       created_at,

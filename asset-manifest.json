@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/Accountability-dashboard-p2p/static/css/main.f6b340e5.css",
-    "main.js": "/Accountability-dashboard-p2p/static/js/main.5664befb.js",
+    "main.js": "/Accountability-dashboard-p2p/static/js/main.e0a89f81.js",
     "index.html": "/Accountability-dashboard-p2p/index.html",
     "main.f6b340e5.css.map": "/Accountability-dashboard-p2p/static/css/main.f6b340e5.css.map",
-    "main.5664befb.js.map": "/Accountability-dashboard-p2p/static/js/main.5664befb.js.map"
+    "main.e0a89f81.js.map": "/Accountability-dashboard-p2p/static/js/main.e0a89f81.js.map"
   },
   "entrypoints": [
     "static/css/main.f6b340e5.css",
-    "static/js/main.5664befb.js"
+    "static/js/main.e0a89f81.js"
   ]
 }

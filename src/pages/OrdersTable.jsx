@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { emptyOrder, formatVES } from '../utils/expediente';
+import { emptyOrder, formatVES, exportCSV } from '../utils/expediente';
 
 function computeCommission(order) {
   const base = 0.0025;
@@ -177,6 +177,17 @@ export default function OrdersTable({ expediente, onUpdateOrders, showToast }) {
     showToast('Orden duplicada — edita el número', 'ok');
   };
 
+  const downloadFiltered = () => {
+    const csvText = exportCSV(filtered);
+    const label = filterType === 'all' ? 'todas' : filterType === 'buy' ? 'compras' : filterType === 'sell' ? 'ventas' : 'gastos';
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: url, download: `ordenes_${label}_${new Date().toISOString().slice(0,10)}.csv` });
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`✓ CSV descargado — ${filtered.length} órdenes (${label})`, 'ok');
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -192,7 +203,10 @@ export default function OrdersTable({ expediente, onUpdateOrders, showToast }) {
           <option value="sell">Ventas</option>
           <option value="expense">Gastos</option>
         </select>
-        <div style={{ marginLeft: 'auto' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button className="btn btn-ghost" onClick={downloadFiltered} title={`Descargar ${filtered.length} órdenes filtradas`}>
+            ↓ CSV ({filtered.length})
+          </button>
           <button className="btn btn-primary" onClick={() => setModal({ mode: 'new', order: emptyOrder() })}>
             + Nueva Orden
           </button>

@@ -6,14 +6,16 @@ import {
 import Dashboard    from './pages/Dashboard';
 import OrdersTable  from './pages/OrdersTable';
 import CyclesView   from './pages/CyclesView';
-import Calculator   from './pages/Calculator';
+import Calculator     from './pages/Calculator';
+import Reconciliation from './pages/Reconciliation';
 import './App.css';
 
 const NAV = [
-  { id: 'dashboard',   label: 'Dashboard',   icon: '◈' },
-  { id: 'orders',      label: 'Órdenes',     icon: '≡' },
-  { id: 'cycles',      label: 'Ciclos',      icon: '◎' },
-  { id: 'calculator',  label: 'Calculadora', icon: '⟁' },
+  { id: 'dashboard',      label: 'Dashboard',      icon: '◈' },
+  { id: 'orders',         label: 'Órdenes',        icon: '≡' },
+  { id: 'cycles',         label: 'Ciclos',         icon: '◎' },
+  { id: 'calculator',     label: 'Calculadora',    icon: '⟁' },
+  { id: 'reconciliation', label: 'Conciliación',   icon: '⇌' },
 ];
 
 export default function App() {
@@ -93,7 +95,7 @@ export default function App() {
   }, [expediente, showToast]);
 
   const navigate = (id) => { setView(id); setDrawerOpen(false); };
-  const PAGE = {dashboard: Dashboard, orders: OrdersTable, cycles: CyclesView, calculator: Calculator};
+  const PAGE = {dashboard: Dashboard, orders: OrdersTable, cycles: CyclesView, calculator: Calculator, reconciliation: Reconciliation};
   const CurrentPage = PAGE[view];
   const currentNav  = NAV.find(n => n.id === view);
 

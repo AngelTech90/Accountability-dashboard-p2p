@@ -374,3 +374,21 @@
 @media (max-width: 400px) {
   .calc-inputs-grid { grid-template-columns: 1fr; }
 }
+
+/* ── Reconciliation drop zone ────────────────────────── */
+.recon-drop-zone {
+  border: 2px dashed var(--border-bright);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 28px 20px;
+  transition: all 0.18s;
+}
+.recon-drop-zone:hover {
+  border-color: var(--blue-dim);
+  background: var(--blue-bg);
+}

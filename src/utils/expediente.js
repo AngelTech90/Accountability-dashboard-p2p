@@ -245,7 +245,8 @@ export function parseCSV(text) {
     const cols = line.split(',');
 
     const status = COL.status >= 0 ? cols[COL.status]?.trim() : '';
-    if (/cancel/i.test(status)) continue; // skip cancelled
+    // Only keep completed orders when status column is detected
+    if (COL.status >= 0 && !/complet/i.test(status)) continue;
 
     const rawType = COL.order_type >= 0 ? cols[COL.order_type]?.trim() : '';
     const order_type = normalizeType(rawType);
@@ -331,4 +332,93 @@ export function formatVES(n, short=false) {
 export function formatUSDTShort(n) {
   if (n == null || isNaN(n)) return '—';
   return parseFloat(n).toFixed(2);
+}
+
+// ─── Bank CSV Parser ──────────────────────────────────────────────────────────
+// Parses a generic Venezuelan bank CSV and extracts transaction amounts.
+export function parseBankCSV(text) {
+  const lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+  if (lines.length < 2) throw new Error('CSV bancario vacío');
+
+  const headerLine = lines[0].replace(/^\ufeff/, '');
+  const headers = headerLine.split(',').map(h => h.trim());
+
+  // Find amount column: monto, débito, crédito, importe, amount, total
+  const amountIdx = headers.findIndex(h => /monto|d[eé]bito|cr[eé]dito|importe|amount|total|cargo|abono/i.test(h));
+  // Find reference/description column
+  const refIdx    = headers.findIndex(h => /referencia|ref|descripci[oó]n|concepto|detalle/i.test(h));
+  // Find date column
+  const dateIdx   = headers.findIndex(h => /fecha|date|dia/i.test(h));
+
+  if (amountIdx < 0) throw new Error('No se encontró columna de monto en CSV bancario');
+
+  const transactions = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = line.split(',');
+
+    const rawAmount = (cols[amountIdx] || '').trim().replace(/[^\d.,-]/g, '').replace(/\./g, '').replace(',', '.');
+    const amount = parseFloat(rawAmount);
+    if (isNaN(amount) || amount === 0) continue;
+
+    transactions.push({
+      id: i,
+      amount: Math.abs(amount),
+      amount_str: Math.abs(amount).toFixed(2),
+      reference: refIdx >= 0 ? (cols[refIdx] || '').trim() : '',
+      date: dateIdx >= 0 ? (cols[dateIdx] || '').trim() : '',
+      raw_line: line,
+    });
+  }
+
+  if (transactions.length === 0) throw new Error('No se encontraron transacciones válidas');
+  return transactions;
+}
+
+// ─── Reconciliation: match Binance orders with bank transactions ──────────────
+// Matching rule: truncate last digit of Binance fiat_amount (3 decimals → 2 decimals)
+// and compare exact string match with bank transaction amount (2 decimals).
+export function reconcileOrders(orders, bankTransactions) {
+  const matched   = [];
+  const unmatchedOrders = [];
+  const unmatchedBank   = [...bankTransactions];
+
+  // Build lookup from bank amounts (2 decimal strings)
+  const bankByAmount = new Map();
+  bankTransactions.forEach((tx, idx) => {
+    const key = tx.amount_str;
+    if (!bankByAmount.has(key)) bankByAmount.set(key, []);
+    bankByAmount.get(key).push({ ...tx, _idx: idx });
+  });
+
+  // Track which bank transactions are used
+  const usedBankIds = new Set();
+
+  for (const order of orders) {
+    // Truncate Binance fiat_amount: remove last digit of the 3-decimal string
+    const fiatStr3 = (order.fiat_amount || 0).toFixed(3); // e.g. "15289.678"
+    const truncated = fiatStr3.slice(0, -1);               // e.g. "15289.67"
+
+    const candidates = bankByAmount.get(truncated) || [];
+    const match = candidates.find(c => !usedBankIds.has(c.id));
+
+    if (match) {
+      usedBankIds.add(match.id);
+      matched.push({
+        order,
+        bank_tx: match,
+        binance_bs: fiatStr3,
+        bank_bs: match.amount_str,
+        truncated_bs: truncated,
+      });
+    } else {
+      unmatchedOrders.push({ order, binance_bs: fiatStr3, truncated_bs: truncated });
+    }
+  }
+
+  // Remaining unmatched bank transactions
+  const unmatchedBankResult = unmatchedBank.filter(tx => !usedBankIds.has(tx.id));
+
+  return { matched, unmatchedOrders, unmatchedBank: unmatchedBankResult };
 }

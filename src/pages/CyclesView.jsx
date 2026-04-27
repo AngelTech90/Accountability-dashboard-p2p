@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Bar, Line } from 'react-chartjs-2';
-import { formatVES, formatUSDTShort } from '../utils/expediente';
+import { formatVES, formatUSDTShort, exportCSV } from '../utils/expediente';
 
 const OPTS = {
   responsive: true, maintainAspectRatio: false,
@@ -82,11 +82,66 @@ export default function CyclesView({ expediente }) {
   const avgCoverage    = cycles.length > 0
     ? cycles.reduce((s,c) => s+(c.coverage_pct||0), 0) / cycles.length : 0;
 
+  const downloadCyclesCSV = () => {
+    // Build CSV from cycles data with per-cycle info
+    const headers = ['Ciclo','Venta Orden','USDT Vendido','Precio Venta','USDT Comprado','Cobertura %','Profit USDT','Profit VES','Parcial'];
+    const rows = cycles.map(c => [
+      c.cycle_id,
+      c.sell_order || '',
+      (c.sell_usdt||0).toFixed(2),
+      (c.sell_price||0).toFixed(3),
+      (c.total_bought||0).toFixed(2),
+      (c.coverage_pct||0).toFixed(1),
+      (c.profit_usdt||0).toFixed(4),
+      (c.profit_ves||0).toFixed(2),
+      c.is_partial ? 'Si' : 'No',
+    ]);
+    const csvText = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: url, download: `ciclos_${new Date().toISOString().slice(0,10)}.csv` });
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadCycleOrders = () => {
+    // Export all buy orders from all cycles as a flat CSV
+    const allCycleOrders = [];
+    cycles.forEach(c => {
+      if (c.per_order_profit && c.per_order_profit.length > 0) {
+        c.per_order_profit.forEach(p => {
+          allCycleOrders.push({
+            order_number: p.order_uid || '', order_type: 'buy',
+            usdt_amount: p.usdt_amount, unit_price: p.buy_price,
+            fiat_amount: p.usdt_amount * p.buy_price,
+            commission_usdt: p.buy_commission || 0,
+            counterparty: '', payment_method: '',
+            created_at: '', source: 'cycle',
+          });
+        });
+      }
+    });
+    const csvText = exportCSV(allCycleOrders);
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: url, download: `ordenes_ciclos_${new Date().toISOString().slice(0,10)}.csv` });
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="page">
-      <div className="page-header">
-        <div className="page-title">Ciclos P2P</div>
-        <div className="page-sub">{cycles.length} CICLOS · MODELO VENTANA TEMPORAL</div>
+      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+        <div>
+          <div className="page-title">Ciclos P2P</div>
+          <div className="page-sub">{cycles.length} CICLOS · MODELO VENTANA TEMPORAL</div>
+        </div>
+        {cycles.length > 0 && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-ghost" onClick={downloadCyclesCSV} title="Descargar resumen de ciclos">↓ Ciclos CSV</button>
+            <button className="btn btn-ghost" onClick={downloadCycleOrders} title="Descargar órdenes de compra de ciclos">↓ Órdenes CSV</button>
+          </div>
+        )}
       </div>
 
       <div className="stat-grid">

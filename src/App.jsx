@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   enrichExpediente, EMPTY_EXPEDIENTE, validateExpediente,
   computeCycles, computeStats, parseCSV, exportCSV
@@ -10,6 +10,29 @@ import Calculator     from './pages/Calculator';
 import Reconciliation from './pages/Reconciliation';
 import './App.css';
 
+// ─── localStorage cache ─────────────────────────────────────────────────────
+const CACHE_KEY = 'god_analyzer_expediente';
+
+function loadCached() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (data && Array.isArray(data.orders) && data.orders.length > 0) return data;
+  } catch { /* corrupt cache, ignore */ }
+  return null;
+}
+
+function saveCache(exp) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      chat_id: exp.chat_id, date: exp.date,
+      orders: exp.orders, cycles: exp.cycles,
+      stats: exp.stats, bank_receipts: exp.bank_receipts || [],
+    }));
+  } catch { /* quota exceeded, silently fail */ }
+}
+
 const NAV = [
   { id: 'dashboard',      label: 'Dashboard',      icon: '◈' },
   { id: 'orders',         label: 'Órdenes',        icon: '≡' },
@@ -20,15 +43,53 @@ const NAV = [
 
 export default function App() {
   const [view, setView]             = useState('dashboard');
-  const [expediente, setExpediente] = useState(() => enrichExpediente({...EMPTY_EXPEDIENTE}));
+  const [expediente, setExpediente] = useState(() => {
+    const cached = loadCached();
+    if (cached) return enrichExpediente(cached);
+    return enrichExpediente({...EMPTY_EXPEDIENTE});
+  });
   const [toast, setToast]           = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [ioPopup, setIoPopup]       = useState(null); // 'upload' | 'download' | null
+
+  // Track whether the full expediente has been exported (JSON or CSV via export popup).
+  // Resets to false every time the expediente data changes (new import or order edit).
+  const hasExportedRef = useRef(false);
 
   const showToast = useCallback((msg, type='ok') => {
     setToast({msg, type});
     setTimeout(() => setToast(null), 3000);
   }, []);
+
+  // ── Persist to localStorage on every expediente change ──────────────────
+  useEffect(() => {
+    saveCache(expediente);
+    // Data changed → user hasn't exported THIS version yet
+    hasExportedRef.current = false;
+  }, [expediente]);
+
+  // ── Show cached-data toast on first load ────────────────────────────────
+  useEffect(() => {
+    if (expediente.orders.length > 0 && loadCached()) {
+      showToast(`Sesión restaurada — ${expediente.orders.length} órdenes en caché`, 'ok');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── beforeunload guard: block leaving if data exists and not exported ───
+  useEffect(() => {
+    const handler = (e) => {
+      // No data loaded → let them leave freely
+      if (expediente.orders.length === 0) return;
+      // Already exported the full expediente → safe to leave
+      if (hasExportedRef.current) return;
+      // Block: browser shows native "are you sure?" dialog
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [expediente.orders.length]);
 
   const updateOrders = useCallback((newOrders) => {
     setExpediente(prev => {
@@ -47,12 +108,10 @@ export default function App() {
       const text = ev.target.result;
       try {
         if (file.name.endsWith('.csv')) {
-          // CSV import
           const data = parseCSV(text);
           setExpediente(enrichExpediente({...data, chat_id: file.name.replace('.csv','')}));
           showToast(`✓ CSV importado — ${data.orders.length} órdenes`, 'ok');
         } else {
-          // JSON import
           const data = JSON.parse(text);
           if (!validateExpediente(data)) throw new Error('Formato JSON inválido');
           setExpediente(enrichExpediente(data));
@@ -67,7 +126,7 @@ export default function App() {
     setIoPopup(null);
   }, [showToast]);
 
-  // ── Download JSON ────────────────────────────────────────────────────────
+  // ── Download JSON (full expediente export) ──────────────────────────────
   const handleDownloadJSON = useCallback(() => {
     const clean = {
       chat_id: expediente.chat_id, date: expediente.date,
@@ -79,18 +138,20 @@ export default function App() {
     const url  = URL.createObjectURL(blob);
     const a    = Object.assign(document.createElement('a'), {href:url, download:`expediente_${expediente.chat_id||'export'}_${expediente.date}.json`});
     a.click(); URL.revokeObjectURL(url);
-    showToast('✓ JSON descargado', 'ok');
+    hasExportedRef.current = true;
+    showToast('✓ JSON descargado — puedes cerrar la página', 'ok');
     setIoPopup(null);
   }, [expediente, showToast]);
 
-  // ── Download CSV ─────────────────────────────────────────────────────────
+  // ── Download CSV (full expediente export) ───────────────────────────────
   const handleDownloadCSV = useCallback(() => {
     const csvText = exportCSV(expediente.orders);
     const blob = new Blob([csvText], {type:'text/csv;charset=utf-8;'});
     const url  = URL.createObjectURL(blob);
     const a    = Object.assign(document.createElement('a'), {href:url, download:`ordenes_${expediente.chat_id||'export'}_${expediente.date}.csv`});
     a.click(); URL.revokeObjectURL(url);
-    showToast('✓ CSV descargado', 'ok');
+    hasExportedRef.current = true;
+    showToast('✓ CSV descargado — puedes cerrar la página', 'ok');
     setIoPopup(null);
   }, [expediente, showToast]);
 

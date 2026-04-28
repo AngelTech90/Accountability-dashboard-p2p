@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { parseBankCSV, reconcileOrders, formatVES } from '../utils/expediente';
+import { parseBankCSV, reconcileOrders } from '../utils/expediente';
 
 export default function Reconciliation({ expediente }) {
   const { orders } = expediente;

@@ -25,6 +25,9 @@
   --blue-bg: rgba(77, 159, 255, 0.07);
   --purple: #b06dff;
   --purple-bg: rgba(176, 109, 255, 0.08);
+  --yellow: #e2b714;
+  --yellow-dim: #b8960f;
+  --yellow-bg: rgba(226, 183, 20, 0.07);
 
   --font-display: 'Syne', sans-serif;
   --font-mono: 'Space Mono', monospace;

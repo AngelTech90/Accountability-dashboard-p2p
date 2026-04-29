@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Bar, Line } from 'react-chartjs-2';
 import { formatVES, formatUSDTShort, exportCSV } from '../utils/expediente';
+import CycleDetail from './CycleDetail';
 
 const OPTS = {
   responsive: true, maintainAspectRatio: false,
@@ -13,7 +14,7 @@ const OPTS = {
 
 export default function CyclesView({ expediente }) {
   const { orders, cycles } = expediente;
-  const [selected, setSelected] = useState(null);
+  const [detailIdx, setDetailIdx] = useState(null);  // index of cycle to show detail page
 
   const profitBarData = useMemo(() => ({
     labels: cycles.map((_,i) => `C${i+1}`),
@@ -48,34 +49,6 @@ export default function CyclesView({ expediente }) {
       fill:true, tension:0.35, pointRadius:5, pointBackgroundColor:'#ffb547'
     }]
   }), [cycles]);
-
-  // Resolve buy orders for drill-down
-  // Bot uses uid like "4de58a4d_0". Try matching by order_number first, then per_order_profit amounts.
-  const selCycle = selected !== null ? cycles[selected] : null;
-
-  const selBuyOrders = useMemo(() => {
-    if (!selCycle) return [];
-    // If cycle has per_order_profit, show those as rows (they have usdt_amount, buy_price, profit_usdt)
-    if (selCycle.per_order_profit && selCycle.per_order_profit.length > 0) {
-      return selCycle.per_order_profit.map((p, i) => ({
-        id: p.order_uid || i,
-        order_number: p.order_uid || '',
-        usdt_amount: p.usdt_amount,
-        unit_price: p.buy_price,
-        fiat_amount: p.usdt_amount * p.buy_price,
-        profit_usdt: p.profit_usdt,
-        profit_ves: p.profit_ves,
-        profit_pct: p.profit_pct,
-        is_pago_movil: false,
-        counterparty: ''
-      }));
-    }
-    // Fallback: match by order_number in orders array
-    return orders.filter(o =>
-      o.order_type === 'buy' &&
-      selCycle.buy_orders.includes(o.order_number || o.id)
-    );
-  }, [selCycle, orders]);
 
   const totalProfit    = cycles.reduce((s,c) => s+(c.profit_usdt||0), 0);
   const totalProfitVES = cycles.reduce((s,c) => s+(c.profit_ves||0), 0);
@@ -128,6 +101,11 @@ export default function CyclesView({ expediente }) {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  // If a cycle detail is open, render the detail page
+  if (detailIdx !== null && cycles[detailIdx]) {
+    return <CycleDetail cycle={cycles[detailIdx]} orders={orders} onBack={() => setDetailIdx(null)} />;
+  }
 
   return (
     <div className="page">
@@ -186,7 +164,7 @@ export default function CyclesView({ expediente }) {
         </div>
       </div>
 
-      {/* ── Cycle table ── */}
+      {/* ── Cycle table — click to open detail page ── */}
       <div className="table-wrap">
         <table className="data-table">
           <thead>
@@ -209,73 +187,29 @@ export default function CyclesView({ expediente }) {
               </td></tr>
             )}
             {cycles.map((c,i) => (
-              <React.Fragment key={i}>
-                <tr style={{cursor:'pointer', background: selected===i?'var(--bg-3)':''}}
-                    onClick={() => setSelected(selected===i?null:i)}>
-                  <td style={{fontWeight:700,color:'var(--text-2)'}}>C{c.cycle_id||i+1}</td>
-                  <td style={{fontSize:10,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
-                      title={c.sell_order}>{c.sell_order||'—'}</td>
-                  <td className="text-green">{formatUSDTShort(c.sell_usdt)}</td>
-                  <td>{(c.sell_price||0).toLocaleString('es-VE')}</td>
-                  <td className="text-blue">{formatUSDTShort(c.total_bought)}</td>
-                  <td>
-                    <div style={{display:'flex',alignItems:'center',gap:8}}>
-                      <div style={{flex:1,height:4,background:'var(--bg-4)',borderRadius:2}}>
-                        <div style={{height:'100%',width:`${Math.min(c.coverage_pct||0,100)}%`,
-                          background: c.coverage_pct>=95?'var(--green)':c.coverage_pct>=50?'var(--amber)':'var(--red)',
-                          borderRadius:2}} />
-                      </div>
-                      <span style={{fontSize:11,minWidth:34}}>{(c.coverage_pct||0).toFixed(0)}%</span>
+              <tr key={i} style={{cursor:'pointer'}} onClick={() => setDetailIdx(i)}>
+                <td style={{fontWeight:700,color:'var(--text-2)'}}>C{c.cycle_id||i+1}</td>
+                <td style={{fontSize:10,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                    title={c.sell_order}>{c.sell_order||'—'}</td>
+                <td className="text-green">{formatUSDTShort(c.sell_usdt)}</td>
+                <td>{(c.sell_price||0).toLocaleString('es-VE')}</td>
+                <td className="text-blue">{formatUSDTShort(c.total_bought)}</td>
+                <td>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <div style={{flex:1,height:4,background:'var(--bg-4)',borderRadius:2}}>
+                      <div style={{height:'100%',width:`${Math.min(c.coverage_pct||0,100)}%`,
+                        background: c.coverage_pct>=95?'var(--green)':c.coverage_pct>=50?'var(--amber)':'var(--red)',
+                        borderRadius:2}} />
                     </div>
-                  </td>
-                  <td className={c.profit_usdt>=0?'text-green':'text-red'} style={{fontWeight:700}}>
-                    {c.profit_usdt>=0?'+':''}{formatUSDTShort(c.profit_usdt)}
-                  </td>
-                  <td className={c.profit_ves>=0?'text-green':'text-red'}>{formatVES(c.profit_ves,true)}</td>
-                  <td>{selected===i?'▲':'▼'}</td>
-                </tr>
-
-                {selected===i && (
-                  <tr>
-                    <td colSpan={9} style={{padding:0,background:'var(--bg-1)'}}>
-                      <div style={{padding:'14px 18px'}}>
-                        <div style={{fontSize:11,color:'var(--text-2)',marginBottom:10,letterSpacing:'0.08em'}}>
-                          ÓRDENES DE COMPRA EN ESTE CICLO — {selBuyOrders.length}
-                          {c.is_partial && <span style={{color:'var(--amber)',marginLeft:8}}>· CICLO PARCIAL ({(c.coverage_pct||0).toFixed(0)}% cobertura)</span>}
-                        </div>
-                        {selBuyOrders.length === 0
-                          ? <div style={{color:'var(--text-3)',fontSize:12}}>Sin detalle de compras disponible</div>
-                          : <div style={{overflowX:'auto'}}>
-                              <table className="data-table" style={{background:'var(--bg-1)',minWidth:480}}>
-                                <thead><tr>
-                                  <th>Orden / UID</th>
-                                  <th>USDT</th>
-                                  <th>Precio compra</th>
-                                  <th>Profit USDT</th>
-                                  <th>Profit VES</th>
-                                  <th>Profit %</th>
-                                </tr></thead>
-                                <tbody>
-                                  {selBuyOrders.map((b,bi) => (
-                                    <tr key={bi}>
-                                      <td style={{fontSize:10,maxWidth:130,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
-                                          title={b.order_number||b.id}>{b.order_number||b.id||'—'}</td>
-                                      <td className="text-blue">{(b.usdt_amount||0).toFixed(2)}</td>
-                                      <td>{(b.unit_price||b.buy_price||0).toLocaleString('es-VE')}</td>
-                                      <td className="text-green">+{(b.profit_usdt||0).toFixed(4)}</td>
-                                      <td className="text-green">{formatVES(b.profit_ves,true)}</td>
-                                      <td className="text-amber">{(b.profit_pct||0).toFixed(2)}%</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                        }
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
+                    <span style={{fontSize:11,minWidth:34}}>{(c.coverage_pct||0).toFixed(0)}%</span>
+                  </div>
+                </td>
+                <td className={c.profit_usdt>=0?'text-green':'text-red'} style={{fontWeight:700}}>
+                  {c.profit_usdt<0?'-':''}{formatUSDTShort(Math.abs(c.profit_usdt))}
+                </td>
+                <td className={c.profit_ves>=0?'text-green':'text-red'}>{formatVES(c.profit_ves,true)}</td>
+                <td style={{color:'var(--text-3)',fontSize:13}}>→</td>
+              </tr>
             ))}
           </tbody>
         </table>

@@ -63,23 +63,29 @@ export default function Calculator() {
     // Buy commission: input rate + pago movil extra
     const buyCommRate  = commRate + (isPm ? 0.003 : 0);
 
-    // Real prices after commission
+    // ── XLSX model: commission applied to total amounts ──
+    // Step 1: VES received from selling capital USDT (commission deducted from VES total)
+    const montoVenta = capital * sellRate * (1 - sellCommRate);
+    // Step 2: USDT bought back with those VES (commission deducted from USDT total)
+    const usdtCompra = (montoVenta / buyRate) * (1 - buyCommRate);
+    // Step 3: Profit per cycle = USDT recovered - USDT sold
+    const profitPerCycle = usdtCompra - capital;
+
+    // Ganancia % = net profit percentage (after all commissions)
+    const ganancia = profitPerCycle / capital;
+
+    // Effective prices per USDT (for display)
     const realSellPrice = sellRate * (1 - sellCommRate);
-    const realBuyPrice  = buyRate * (1 + buyCommRate);
+    const realBuyPrice  = buyRate / (1 - buyCommRate);
+    const bsPerUSDT     = realSellPrice - realBuyPrice;
 
-    // BS earned per USDT = difference between what you get selling and what you pay buying
-    const bsPerUSDT = realSellPrice - realBuyPrice;
+    // Break-even buy rate: max buy rate where profit = 0
+    const tasaMinima = sellRate * (1 - sellCommRate) * (1 - buyCommRate);
 
-    // Spread
-    const ganancia = (sellRate - buyRate) / buyRate;
-
-    // Profit per cycle in USDT
-    const profitPerCycle = capital * (realSellPrice - realBuyPrice) / sellRate;
-    const profitTotal    = profitPerCycle * cyclesPerDay;
-
-    // Lot amounts
-    const sellMonto  = capital * sellRate;
-    const buyMonto20 = 20 * buyRate;
+    // Totals
+    const profitTotal = profitPerCycle * cyclesPerDay;
+    const sellMonto   = capital * sellRate;
+    const buyMonto20  = 20 * buyRate;
 
     return {
       ganancia, sellMonto, buyMonto20,
@@ -87,6 +93,7 @@ export default function Calculator() {
       sellCommRate, buyCommRate,
       profitPerCycle, profitTotal,
       profitMonth: profitTotal * 30,
+      tasaMinima,
     };
   }, [capital, sellRate, buyRate, cyclesPerDay, commPct, isPm, isDirect]);
 
@@ -173,7 +180,8 @@ export default function Calculator() {
               />
               <ResultRow label="Precio real venta" value={`Bs. ${fVES(calc.realSellPrice)}`} accent="var(--green)" large />
               <ResultRow label="Precio real compra" value={`Bs. ${fVES(calc.realBuyPrice)}`} accent="var(--blue)" large />
-              <ResultRow label="BS ganados / USDT" value={`Bs. ${fVES(calc.bsPerUSDT)}`} accent={calc.bsPerUSDT >= 0 ? 'var(--green)' : 'var(--red)'} large last />
+              <ResultRow label="BS ganados / USDT" value={`Bs. ${fVES(calc.bsPerUSDT)}`} accent={calc.bsPerUSDT >= 0 ? 'var(--green)' : 'var(--red)'} large />
+              <ResultRow label="Tasa mínima compra" value={`Bs. ${calc.tasaMinima.toFixed(3)}`} accent="var(--amber)" last />
             </>}
           </div>
         </div>

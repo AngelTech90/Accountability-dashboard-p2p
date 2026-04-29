@@ -8,10 +8,12 @@ import OrdersTable  from './pages/OrdersTable';
 import CyclesView   from './pages/CyclesView';
 import Calculator     from './pages/Calculator';
 import Reconciliation from './pages/Reconciliation';
+import Expedientes    from './pages/Expedientes';
 import './App.css';
 
 // ─── localStorage cache ─────────────────────────────────────────────────────
-const CACHE_KEY = 'god_analyzer_expediente';
+const CACHE_KEY       = 'god_analyzer_expediente';
+const MULTI_CACHE_KEY = 'p2p_manager_expedientes';
 
 function loadCached() {
   try {
@@ -33,12 +35,28 @@ function saveCache(exp) {
   } catch { /* quota exceeded, silently fail */ }
 }
 
+// ─── Multi-expediente localStorage ──────────────────────────────────────────
+function loadSavedExpedientes() {
+  try {
+    const raw = localStorage.getItem(MULTI_CACHE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) || [];
+  } catch { return []; }
+}
+
+function saveSavedExpedientes(list) {
+  try {
+    localStorage.setItem(MULTI_CACHE_KEY, JSON.stringify(list));
+  } catch { /* quota exceeded */ }
+}
+
 const NAV = [
   { id: 'dashboard',      label: 'Dashboard',      icon: '◈' },
   { id: 'orders',         label: 'Órdenes',        icon: '≡' },
   { id: 'cycles',         label: 'Ciclos',         icon: '◎' },
   { id: 'calculator',     label: 'Calculadora',    icon: '⟁' },
   { id: 'reconciliation', label: 'Conciliación',   icon: '⇌' },
+  { id: 'expedientes',    label: 'Expedientes',    icon: '📋' },
 ];
 
 export default function App() {
@@ -48,6 +66,7 @@ export default function App() {
     if (cached) return enrichExpediente(cached);
     return enrichExpediente({...EMPTY_EXPEDIENTE});
   });
+  const [savedExpedientes, setSavedExpedientes] = useState(loadSavedExpedientes);
   const [toast, setToast]           = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [ioPopup, setIoPopup]       = useState(null); // 'upload' | 'download' | null
@@ -67,6 +86,52 @@ export default function App() {
     // Data changed → user hasn't exported THIS version yet
     hasExportedRef.current = false;
   }, [expediente]);
+
+  // ── Persist saved expedientes list ──────────────────────────────────────
+  useEffect(() => {
+    saveSavedExpedientes(savedExpedientes);
+  }, [savedExpedientes]);
+
+  // ── Multi-expediente CRUD ──────────────────────────────────────────────
+  const handleSaveExpediente = useCallback(() => {
+    if (expediente.orders.length === 0) {
+      showToast('✗ No hay datos para guardar', 'err');
+      return;
+    }
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const entry = {
+      id,
+      name: expediente.chat_id || '',
+      data: {
+        chat_id: expediente.chat_id, date: expediente.date,
+        orders: expediente.orders.map(({id: _id, ...rest}) => rest),
+        cycles: expediente.cycles, stats: expediente.stats,
+        bank_receipts: expediente.bank_receipts || [],
+      },
+    };
+    setSavedExpedientes(prev => [entry, ...prev]);
+    showToast(`✓ Expediente guardado — ${expediente.orders.length} órdenes`, 'ok');
+    setIoPopup(null);
+  }, [expediente, showToast]);
+
+  const handleLoadExpediente = useCallback((expId) => {
+    const found = savedExpedientes.find(e => e.id === expId);
+    if (!found) return;
+    setExpediente(enrichExpediente(found.data));
+    setView('dashboard');
+    showToast(`✓ Expediente "${found.name || 'Sin nombrar'}" cargado`, 'ok');
+  }, [savedExpedientes, showToast]);
+
+  const handleDeleteExpediente = useCallback((expId) => {
+    setSavedExpedientes(prev => prev.filter(e => e.id !== expId));
+    showToast('Expediente eliminado', 'ok');
+  }, [showToast]);
+
+  const handleRenameExpediente = useCallback((expId, newName) => {
+    setSavedExpedientes(prev =>
+      prev.map(e => e.id === expId ? {...e, name: newName || ''} : e)
+    );
+  }, []);
 
   // ── Show cached-data toast on first load ────────────────────────────────
   useEffect(() => {
@@ -99,7 +164,7 @@ export default function App() {
     });
   }, []);
 
-  // ── Import handler: JSON or CSV ──────────────────────────────────────────
+  // ── Import handler: JSON, CSV, or full backup ─────────────────────────────
   const handleUpload = useCallback((e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -113,9 +178,16 @@ export default function App() {
           showToast(`✓ CSV importado — ${data.orders.length} órdenes`, 'ok');
         } else {
           const data = JSON.parse(text);
-          if (!validateExpediente(data)) throw new Error('Formato JSON inválido');
-          setExpediente(enrichExpediente(data));
-          showToast(`✓ Expediente cargado — ${data.orders.length} órdenes`, 'ok');
+          // Full backup (version 2) → restore current + all saved expedientes
+          if (data.version === 2 && data.current && Array.isArray(data.expedientes)) {
+            setExpediente(enrichExpediente(data.current));
+            setSavedExpedientes(data.expedientes);
+            showToast(`✓ Backup restaurado — ${1 + data.expedientes.length} expedientes`, 'ok');
+          } else {
+            if (!validateExpediente(data)) throw new Error('Formato JSON inválido');
+            setExpediente(enrichExpediente(data));
+            showToast(`✓ Expediente cargado — ${data.orders.length} órdenes`, 'ok');
+          }
         }
       } catch (err) {
         showToast('✗ Error: ' + err.message, 'err');
@@ -155,8 +227,31 @@ export default function App() {
     setIoPopup(null);
   }, [expediente, showToast]);
 
+  // ── Download ALL expedientes (current + saved) as single JSON backup ────
+  const handleDownloadAll = useCallback(() => {
+    const currentClean = {
+      chat_id: expediente.chat_id, date: expediente.date,
+      orders:  expediente.orders.map(({id, ...rest}) => rest),
+      cycles:  expediente.cycles, stats: expediente.stats,
+      bank_receipts: expediente.bank_receipts || [],
+    };
+    const backup = {
+      version: 2,
+      exported_at: new Date().toISOString(),
+      current: currentClean,
+      expedientes: savedExpedientes.map(e => ({ id: e.id, name: e.name, data: e.data })),
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], {type:'application/json'});
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'), {href:url, download:`p2p_manager_backup_${new Date().toISOString().slice(0,10)}.json`});
+    a.click(); URL.revokeObjectURL(url);
+    hasExportedRef.current = true;
+    showToast(`✓ Backup completo — ${1 + savedExpedientes.length} expedientes`, 'ok');
+    setIoPopup(null);
+  }, [expediente, savedExpedientes, showToast]);
+
   const navigate = (id) => { setView(id); setDrawerOpen(false); };
-  const PAGE = {dashboard: Dashboard, orders: OrdersTable, cycles: CyclesView, calculator: Calculator, reconciliation: Reconciliation};
+  const PAGE = {dashboard: Dashboard, orders: OrdersTable, cycles: CyclesView, calculator: Calculator, reconciliation: Reconciliation, expedientes: Expedientes};
   const CurrentPage = PAGE[view];
   const currentNav  = NAV.find(n => n.id === view);
 
@@ -169,7 +264,7 @@ export default function App() {
         </button>
         <div className="mobile-brand">
           <span style={{color:'var(--green)',fontSize:18}}>⬡</span>
-          <span style={{fontFamily:'var(--font-display)',fontSize:13,fontWeight:800,letterSpacing:'0.12em'}}>GOD ANALYZER</span>
+          <span style={{fontFamily:'var(--font-display)',fontSize:13,fontWeight:800,letterSpacing:'0.12em'}}>P2P MANAGER</span>
         </div>
         {currentNav && (
           <div className="mobile-page-label">
@@ -184,14 +279,20 @@ export default function App() {
         <div className="sidebar-brand">
           <span className="brand-icon">⬡</span>
           <div>
-            <div className="brand-title">GOD ANALYZER</div>
-            <div className="brand-sub">BETA</div>
+            <div className="brand-title">P2P MANAGER</div>
+            <div className="brand-sub">V2</div>
           </div>
         </div>
         <nav className="sidebar-nav">
           {NAV.map(n => (
             <button key={n.id} className={`nav-btn ${view===n.id?'active':''}`} onClick={() => setView(n.id)}>
-              <span className="nav-icon">{n.icon}</span><span>{n.label}</span>
+              <span className="nav-icon">{n.icon}</span>
+              <span style={{flex: 1, textAlign: 'left'}}>{n.label}</span>
+              {n.id === 'expedientes' && savedExpedientes.length > 0 && (
+                <span style={{background: 'var(--green-bg)', color: 'var(--green)', padding: '2px 6px', borderRadius: '10px', fontSize: 10, fontWeight: 700}}>
+                  {savedExpedientes.length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -202,12 +303,24 @@ export default function App() {
           </div>
           <button className="io-btn upload-btn"   onClick={() => setIoPopup('upload')}>↑ Cargar</button>
           <button className="io-btn download-btn" onClick={() => setIoPopup('download')}>↓ Exportar</button>
+          {expediente.orders.length > 0 && (
+            <button className="io-btn" onClick={handleSaveExpediente} style={{borderColor:'var(--blue-dim)', color:'var(--blue)'}}>+ Guardar expediente</button>
+          )}
         </div>
       </aside>
 
       {/* ── Main ── */}
       <main className="main-content">
-        <CurrentPage expediente={expediente} onUpdateOrders={updateOrders} showToast={showToast} />
+        {view === 'expedientes' ? (
+          <CurrentPage
+            savedExpedientes={savedExpedientes}
+            onLoad={handleLoadExpediente}
+            onDelete={handleDeleteExpediente}
+            onRename={handleRenameExpediente}
+          />
+        ) : (
+          <CurrentPage expediente={expediente} onUpdateOrders={updateOrders} showToast={showToast} />
+        )}
       </main>
 
       {/* ── Mobile drawer ── */}
@@ -217,15 +330,21 @@ export default function App() {
             <div className="drawer-header">
               <span style={{color:'var(--green)',fontSize:22}}>⬡</span>
               <div>
-                <div style={{fontFamily:'var(--font-display)',fontSize:13,fontWeight:800,letterSpacing:'0.12em'}}>GOD ANALYZER</div>
-                <div style={{fontSize:9,letterSpacing:'0.3em',color:'var(--green)'}}>BETA</div>
+                <div style={{fontFamily:'var(--font-display)',fontSize:13,fontWeight:800,letterSpacing:'0.12em'}}>P2P MANAGER</div>
+                <div style={{fontSize:9,letterSpacing:'0.3em',color:'var(--green)'}}>V2</div>
               </div>
               <button className="drawer-close" onClick={() => setDrawerOpen(false)}>✕</button>
             </div>
             <nav className="drawer-nav">
               {NAV.map(n => (
                 <button key={n.id} className={`nav-btn ${view===n.id?'active':''}`} onClick={() => navigate(n.id)}>
-                  <span className="nav-icon">{n.icon}</span><span>{n.label}</span>
+                  <span className="nav-icon">{n.icon}</span>
+                  <span style={{flex: 1, textAlign: 'left'}}>{n.label}</span>
+                  {n.id === 'expedientes' && savedExpedientes.length > 0 && (
+                    <span style={{background: 'var(--green-bg)', color: 'var(--green)', padding: '2px 6px', borderRadius: '10px', fontSize: 10, fontWeight: 700}}>
+                      {savedExpedientes.length}
+                    </span>
+                  )}
                 </button>
               ))}
             </nav>
@@ -234,6 +353,9 @@ export default function App() {
                 <div className="exp-id">{expediente.chat_id||'Sin expediente'}</div>
                 <div className="exp-date">{expediente.date} · {expediente.orders.length} órdenes</div>
               </div>
+              {expediente.orders.length > 0 && (
+                <button className="io-btn" onClick={() => { handleSaveExpediente(); setDrawerOpen(false); }} style={{borderColor:'var(--blue-dim)', color:'var(--blue)', marginTop:8, width:'100%'}}>+ Guardar expediente</button>
+              )}
             </div>
           </div>
         </div>
@@ -272,7 +394,8 @@ export default function App() {
                   </label>
                   <div style={{marginTop:12, fontSize:10, color:'var(--text-3)', lineHeight:1.6}}>
                     • <b style={{color:'var(--text-2)'}}>JSON:</b> expediente del bot (formato completo)<br/>
-                    • <b style={{color:'var(--text-2)'}}>CSV:</b> historial de órdenes C2C de Binance
+                    • <b style={{color:'var(--text-2)'}}>CSV:</b> historial de órdenes C2C de Binance<br/>
+                    • <b style={{color:'var(--text-2)'}}>Backup:</b> archivo completo con todos los expedientes
                   </div>
                 </>
               ) : (
@@ -291,6 +414,18 @@ export default function App() {
                       ↓ Descargar CSV
                     </button>
                   </div>
+                  {savedExpedientes.length > 0 && (
+                    <>
+                      <div style={{borderTop:'1px solid var(--border)', margin:'14px 0 10px', paddingTop:10}}>
+                        <div style={{fontSize:10, color:'var(--text-3)', marginBottom:8, letterSpacing:'0.08em', textTransform:'uppercase'}}>
+                          Backup completo · {1 + savedExpedientes.length} expedientes
+                        </div>
+                        <button className="io-popup-action" style={{width:'100%', borderColor:'var(--yellow-dim)', color:'var(--yellow)', background:'var(--yellow-bg)'}} onClick={handleDownloadAll}>
+                          ↓ Exportar Todo (JSON)
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
             </div>

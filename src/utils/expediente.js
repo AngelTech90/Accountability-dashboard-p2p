@@ -84,53 +84,109 @@ function normalizeCycle(c, idx) {
 }
 
 // ─── Compute cycles from orders (when JSON has none) ─────────────────────────
+// Uses xlsx-model math: commission applied to VES total (sell) and USDT total (buy).
+// Coverage capped at 100+profit_pct%. Excess buys redistributed to earlier incomplete cycles.
 export function computeCycles(orders) {
-  const active = orders.filter(o => !o.is_expense);
-  const sells  = active.filter(o => o.order_type === 'sell')
+  const sells = orders.filter(o => o.order_type === 'sell')
     .sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
-  const buys   = active.filter(o => o.order_type === 'buy');
+  const buys  = orders.filter(o => o.order_type === 'buy')
+    .sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
 
-  return sells.map((sell, i) => {
-    const nextSell = sells[i+1];
+  const usedBuyIds  = new Set();
+  const overflowBuys = [];
+
+  // ── Phase 1: assign buys by time window, cap by VES budget ──
+  const rawCycles = sells.map((sell, i) => {
+    const nextSell = sells[i + 1];
     const st = new Date(sell.created_at);
     const nt = nextSell ? new Date(nextSell.created_at) : new Date('2099-01-01');
-    const cycleBuys = buys.filter(b => {
+
+    const windowBuys = buys.filter(b => {
+      if (usedBuyIds.has(b.id)) return false;
       const bt = new Date(b.created_at);
       return bt >= st && bt < nt;
     });
-    const totalBought  = cycleBuys.reduce((s,b) => s + b.usdt_amount, 0);
-    const coverage_pct = sell.usdt_amount > 0 ? Math.min(totalBought / sell.usdt_amount, 1) * 100 : 0;
 
-    // Effective sell price after sell commission
+    // VES budget = max VES available from this sell (xlsx model)
     const sellCommRate = sell.is_direct ? 0 : 0.0025;
-    const eff_sell     = sell.unit_price * (1 - sellCommRate);
-    const sellComm     = sell.usdt_amount * sellCommRate;
+    const vesBudget = sell.usdt_amount * sell.unit_price * (1 - sellCommRate);
 
-    // Per-buy profit: qty × (eff_sell - eff_buy) / sell_price
-    // eff_buy = buy_price × (1 + buy_comm_rate)
-    // This gives profit in USDT for each buy order in this cycle
+    let vesSpent = 0;
+    const cycleBuys = [];
+
+    for (const b of windowBuys) {
+      const buyCostVES = b.fiat_amount || (b.usdt_amount * b.unit_price);
+      usedBuyIds.add(b.id);
+      if (vesSpent + buyCostVES <= vesBudget) {
+        cycleBuys.push(b);
+        vesSpent += buyCostVES;
+      } else {
+        overflowBuys.push(b);
+      }
+    }
+
+    return { sell, cycleBuys, sellCommRate, vesBudget, vesSpent, idx: i };
+  });
+
+  // ── Phase 2: redistribute overflow to earlier incomplete cycles ──
+  for (const raw of rawCycles) {
+    if (overflowBuys.length === 0) break;
+    const remainingBudget = raw.vesBudget - raw.vesSpent;
+    if (remainingBudget <= 0) continue;
+
+    const stillOverflow = [];
+    for (const b of overflowBuys) {
+      const buyCostVES = b.fiat_amount || (b.usdt_amount * b.unit_price);
+      if (raw.vesSpent + buyCostVES <= raw.vesBudget) {
+        raw.cycleBuys.push(b);
+        raw.vesSpent += buyCostVES;
+      } else {
+        stillOverflow.push(b);
+      }
+    }
+    overflowBuys.length = 0;
+    overflowBuys.push(...stillOverflow);
+  }
+
+  // ── Phase 3: build final cycle objects with xlsx math ──
+  return rawCycles.map((raw, i) => {
+    const { sell, cycleBuys, sellCommRate } = raw;
+    const totalBought = cycleBuys.reduce((s, b) => s + b.usdt_amount, 0);
+    const sellComm    = sell.usdt_amount * sellCommRate;
+
+    // Effective VES per USDT sold (after sell commission)
+    const effSellVesPerUsdt = sell.unit_price * (1 - sellCommRate);
+
+    // Per-order profit using xlsx model:
+    // profit = USDT_received_after_buy_comm − USDT_equivalent_sold
     const per_order_profit = cycleBuys.map(b => {
-      const buyCommRate  = 0.0025 + (b.is_pago_movil ? 0.003 : 0);
-      const eff_buy      = b.unit_price * (1 + buyCommRate);
-      const profit_usdt  = b.usdt_amount * (eff_sell - eff_buy) / sell.unit_price;
-      const profit_ves   = b.usdt_amount * (sell.unit_price - b.unit_price);
-      const profit_pct   = (eff_sell / eff_buy - 1) * 100;
-      const buyComm      = b.usdt_amount * buyCommRate;
+      const buyCommRate    = 0.0025 + (b.is_pago_movil ? 0.003 : 0);
+      const usdtReceived   = b.usdt_amount * (1 - buyCommRate);
+      const usdtSoldPortion = (b.usdt_amount * b.unit_price) / effSellVesPerUsdt;
+      const profit_usdt    = usdtReceived - usdtSoldPortion;
+      const profit_ves     = b.usdt_amount * (sell.unit_price - b.unit_price);
+      const profit_pct     = usdtSoldPortion > 0 ? (profit_usdt / usdtSoldPortion) * 100 : 0;
+      const buyComm        = b.usdt_amount * buyCommRate;
       return {
-        order_uid:   b.order_number || b.id,
-        usdt_amount: b.usdt_amount,
-        buy_price:   b.unit_price,
-        profit_usdt: parseFloat(profit_usdt.toFixed(4)),
-        profit_ves:  parseFloat(profit_ves.toFixed(2)),
-        profit_pct:  parseFloat(profit_pct.toFixed(3)),
+        order_uid:      b.order_number || b.id,
+        usdt_amount:    b.usdt_amount,
+        buy_price:      b.unit_price,
+        profit_usdt:    parseFloat(profit_usdt.toFixed(4)),
+        profit_ves:     parseFloat(profit_ves.toFixed(2)),
+        profit_pct:     parseFloat(profit_pct.toFixed(3)),
         buy_commission: parseFloat(buyComm.toFixed(4)),
       };
     });
 
-    // Total profit = sum of per-buy profits (no capital subtraction)
-    const profit_usdt  = per_order_profit.reduce((s,p) => s + p.profit_usdt, 0);
-    const profit_ves   = per_order_profit.reduce((s,p) => s + p.profit_ves,  0);
-    const buyComm      = per_order_profit.reduce((s,p) => s + p.buy_commission, 0);
+    const profit_usdt = per_order_profit.reduce((s, p) => s + p.profit_usdt, 0);
+    const profit_ves  = per_order_profit.reduce((s, p) => s + p.profit_ves,  0);
+    const buyComm     = per_order_profit.reduce((s, p) => s + p.buy_commission, 0);
+
+    // Coverage capped at 100 + profit_pct%
+    const rawCoverage    = sell.usdt_amount > 0 ? (totalBought / sell.usdt_amount) * 100 : 0;
+    const cycleProfitPct = sell.usdt_amount > 0 ? (profit_usdt / sell.usdt_amount) * 100 : 0;
+    const maxCoverage    = 100 + cycleProfitPct;
+    const coverage_pct   = Math.min(rawCoverage, maxCoverage);
 
     return {
       cycle_id:        i + 1,
@@ -140,12 +196,12 @@ export function computeCycles(orders) {
       sell_usdt:       sell.usdt_amount,
       sell_price:      sell.unit_price,
       total_bought:    totalBought,
-      coverage_pct,
+      coverage_pct:    parseFloat(coverage_pct.toFixed(2)),
       profit_usdt:     parseFloat(profit_usdt.toFixed(4)),
       profit_ves:      parseFloat(profit_ves.toFixed(2)),
       sell_commission: parseFloat(sellComm.toFixed(4)),
       buy_commission:  parseFloat(buyComm.toFixed(4)),
-      is_partial:      coverage_pct < 99,
+      is_partial:      coverage_pct < 99.5,
       completed_at:    sell.created_at,
       note:            null,
     };
@@ -260,8 +316,6 @@ export function parseCSV(text) {
     }
 
     const usdt_amount = parseFloat(cols[COL.usdt_amount]) || 0;
-    // Sell < 50 USDT → expense
-    const is_expense = order_type === 'sell' && usdt_amount < 50;
 
     // Commission: use whichever commission column has a value
     let commission_usdt = 0;
@@ -287,7 +341,7 @@ export function parseCSV(text) {
       commission_usdt,
       is_pago_movil,
       counterparty:   COL.counterparty >= 0 ? cols[COL.counterparty]?.trim() : '',
-      is_expense,
+      is_expense: false,
       created_at,
       source: 'csv',
     }));
@@ -335,41 +389,140 @@ export function formatUSDTShort(n) {
 }
 
 // ─── Bank CSV Parser ──────────────────────────────────────────────────────────
-// Parses a generic Venezuelan bank CSV and extracts transaction amounts.
-export function parseBankCSV(text) {
-  const lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+// Supports two formats:
+//   Banesco: "Cuenta Corriente xxxx2414..." → SEP=, header, quoted fields, "Bs. -1.500,00"
+//   Mercantil: "Detalle_de_cuenta_0105..." → plain CSV, amounts like -18388 or -25144.22
+// Preserves original sign: negative = money OUT (buy target), positive = money IN (sell target).
+
+// Parse a single quoted-CSV line (handles commas inside quoted fields)
+function parseQuotedCSVLine(line) {
+  const fields = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuotes = !inQuotes; continue; }
+    if (ch === ',' && !inQuotes) { fields.push(current.trim()); current = ''; continue; }
+    current += ch;
+  }
+  fields.push(current.trim());
+  return fields;
+}
+
+// Detect bank type from filename or content
+function detectBankType(text, filename) {
+  const fn = (filename || '').toLowerCase();
+  if (fn.includes('cuenta corriente') || fn.includes('xxxx2414') || fn.includes('banesco'))
+    return 'banesco';
+  if (fn.includes('detalle_de_cuenta') || fn.includes('mercantil'))
+    return 'mercantil';
+  // Fallback: detect from content
+  const first = text.split('\n')[0] || '';
+  if (/^SEP=/i.test(first)) return 'banesco';
+  if (/Monto\s+Bs/i.test(first)) return 'mercantil';
+  return 'unknown';
+}
+
+// Parse Banesco amount: "Bs. -1.500,00" → -1500.00
+function parseBanescoAmount(raw) {
+  // Remove "Bs." prefix and whitespace
+  let s = raw.replace(/^Bs\.?\s*/i, '').trim();
+  // Detect sign
+  const neg = s.startsWith('-');
+  const pos = s.startsWith('+');
+  if (neg || pos) s = s.slice(1).trim();
+  // Remove thousands dots, replace decimal comma with dot
+  s = s.replace(/\./g, '').replace(',', '.');
+  const val = parseFloat(s);
+  if (isNaN(val)) return NaN;
+  return neg ? -val : val;
+}
+
+// Parse Mercantil amount: plain number like -18388 or -25144.22
+function parseMercantilAmount(raw) {
+  const s = raw.replace(/[^0-9.,-]/g, '');
+  return parseFloat(s);
+}
+
+// Detect if description indicates Pago Movil
+function isPagoMovilDesc(desc) {
+  return /pago\s*m[oó]vil|PAGO\s*MOVIL/i.test(desc || '');
+}
+
+export function parseBankCSV(text, filename) {
+  const bankType = detectBankType(text, filename);
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
   if (lines.length < 2) throw new Error('CSV bancario vacío');
 
-  const headerLine = lines[0].replace(/^\ufeff/, '');
-  const headers = headerLine.split(',').map(h => h.trim());
-
-  // Find amount column: monto, débito, crédito, importe, amount, total
-  const amountIdx = headers.findIndex(h => /monto|d[eé]bito|cr[eé]dito|importe|amount|total|cargo|abono/i.test(h));
-  // Find reference/description column
-  const refIdx    = headers.findIndex(h => /referencia|ref|descripci[oó]n|concepto|detalle/i.test(h));
-  // Find date column
-  const dateIdx   = headers.findIndex(h => /fecha|date|dia/i.test(h));
-
-  if (amountIdx < 0) throw new Error('No se encontró columna de monto en CSV bancario');
-
   const transactions = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const cols = line.split(',');
 
-    const rawAmount = (cols[amountIdx] || '').trim().replace(/[^\d.,-]/g, '').replace(/\./g, '').replace(',', '.');
-    const amount = parseFloat(rawAmount);
-    if (isNaN(amount) || amount === 0) continue;
+  if (bankType === 'banesco') {
+    // Banesco: first line "SEP=,", second line headers, then quoted data
+    let headerIdx = 0;
+    if (/^SEP=/i.test(lines[0])) headerIdx = 1;
+    const headers = parseQuotedCSVLine(lines[headerIdx]);
+    const montoIdx = headers.findIndex(h => /monto/i.test(h));
+    const fechaIdx = headers.findIndex(h => /fecha/i.test(h));
+    const refIdx   = headers.findIndex(h => /referencia/i.test(h));
+    const descIdx  = headers.findIndex(h => /descripci[oó]n|descripcion/i.test(h));
+    if (montoIdx < 0) throw new Error('No se encontró columna MONTO en CSV Banesco');
 
-    transactions.push({
-      id: i,
-      amount: Math.abs(amount),
-      amount_str: Math.abs(amount).toFixed(2),
-      reference: refIdx >= 0 ? (cols[refIdx] || '').trim() : '',
-      date: dateIdx >= 0 ? (cols[dateIdx] || '').trim() : '',
-      raw_line: line,
-    });
+    for (let i = headerIdx + 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = parseQuotedCSVLine(line);
+      const rawAmount = cols[montoIdx] || '';
+      const amount = parseBanescoAmount(rawAmount);
+      if (isNaN(amount) || amount === 0) continue;
+      const desc = descIdx >= 0 ? (cols[descIdx] || '') : '';
+
+      transactions.push({
+        id: i,
+        amount,                                     // signed: negative=out, positive=in
+        amount_abs: Math.abs(amount),
+        amount_str: Math.abs(amount).toFixed(2),
+        is_negative: amount < 0,
+        reference: refIdx >= 0 ? (cols[refIdx] || '') : '',
+        description: desc,
+        date: fechaIdx >= 0 ? (cols[fechaIdx] || '') : '',
+        is_pago_movil: isPagoMovilDesc(desc),
+        bank: 'banesco',
+        raw_line: line,
+      });
+    }
+  } else {
+    // Mercantil (or unknown): Tipo,Fecha,Referencia,Descripción,Monto Bs.
+    const headerLine = lines[0].replace(/^\ufeff/, '');
+    const headers = headerLine.split(',').map(h => h.trim());
+    const montoIdx = headers.findIndex(h => /monto/i.test(h));
+    const fechaIdx = headers.findIndex(h => /fecha/i.test(h));
+    const refIdx   = headers.findIndex(h => /referencia/i.test(h));
+    const descIdx  = headers.findIndex(h => /descripci[oó]n|descripcion/i.test(h));
+    if (montoIdx < 0) throw new Error('No se encontró columna de monto en CSV bancario');
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = line.split(',');
+      const rawAmount = (cols[montoIdx] || '').trim();
+      const amount = parseMercantilAmount(rawAmount);
+      if (isNaN(amount) || amount === 0) continue;
+      const desc = descIdx >= 0 ? (cols[descIdx] || '').trim() : '';
+
+      transactions.push({
+        id: i,
+        amount,
+        amount_abs: Math.abs(amount),
+        amount_str: Math.abs(amount).toFixed(2),
+        is_negative: amount < 0,
+        reference: refIdx >= 0 ? (cols[refIdx] || '').trim() : '',
+        description: desc,
+        date: fechaIdx >= 0 ? (cols[fechaIdx] || '').trim() : '',
+        is_pago_movil: isPagoMovilDesc(desc),
+        bank: 'mercantil',
+        raw_line: line,
+      });
+    }
   }
 
   if (transactions.length === 0) throw new Error('No se encontraron transacciones válidas');
@@ -377,30 +530,43 @@ export function parseBankCSV(text) {
 }
 
 // ─── Reconciliation: match Binance orders with bank transactions ──────────────
-// Matching rule: truncate last digit of Binance fiat_amount (3 decimals → 2 decimals)
-// and compare exact string match with bank transaction amount (2 decimals).
+// Rules:
+//   1. Negative bank txs (-) → match ONLY with Binance BUY orders
+//   2. Positive bank txs (+) → match ONLY with Binance SELL orders
+//   3. Fiat amount match: bank 2 decimals must match Binance 3 decimals minus last digit
+//      e.g. bank -12340.12 matches Binance buy order 12340.124 (truncate last digit → 12340.12)
+//   4. Unmatched negative bank txs = real expenses (atemporal)
 export function reconcileOrders(orders, bankTransactions) {
   const matched   = [];
   const unmatchedOrders = [];
-  const unmatchedBank   = [...bankTransactions];
+  const usedBankIds     = new Set();
 
-  // Build lookup from bank amounts (2 decimal strings)
-  const bankByAmount = new Map();
-  bankTransactions.forEach((tx, idx) => {
+  // Separate bank txs by sign for directional matching
+  const negBankTxs = bankTransactions.filter(tx => tx.is_negative);
+  const posBankTxs = bankTransactions.filter(tx => !tx.is_negative);
+
+  // Build lookup maps keyed by absolute amount string (2 decimals)
+  const negByAmount = new Map();
+  negBankTxs.forEach(tx => {
     const key = tx.amount_str;
-    if (!bankByAmount.has(key)) bankByAmount.set(key, []);
-    bankByAmount.get(key).push({ ...tx, _idx: idx });
+    if (!negByAmount.has(key)) negByAmount.set(key, []);
+    negByAmount.get(key).push(tx);
+  });
+  const posByAmount = new Map();
+  posBankTxs.forEach(tx => {
+    const key = tx.amount_str;
+    if (!posByAmount.has(key)) posByAmount.set(key, []);
+    posByAmount.get(key).push(tx);
   });
 
-  // Track which bank transactions are used
-  const usedBankIds = new Set();
-
   for (const order of orders) {
-    // Truncate Binance fiat_amount: remove last digit of the 3-decimal string
-    const fiatStr3 = (order.fiat_amount || 0).toFixed(3); // e.g. "15289.678"
-    const truncated = fiatStr3.slice(0, -1);               // e.g. "15289.67"
+    // Truncate Binance fiat_amount: remove last digit of 3-decimal string
+    const fiatStr3  = (order.fiat_amount || 0).toFixed(3); // e.g. "15289.678"
+    const truncated = fiatStr3.slice(0, -1);                // e.g. "15289.67"
 
-    const candidates = bankByAmount.get(truncated) || [];
+    // Direction: buy orders match negative bank txs, sell orders match positive
+    const lookup = order.order_type === 'buy' ? negByAmount : posByAmount;
+    const candidates = lookup.get(truncated) || [];
     const match = candidates.find(c => !usedBankIds.has(c.id));
 
     if (match) {
@@ -418,7 +584,10 @@ export function reconcileOrders(orders, bankTransactions) {
   }
 
   // Remaining unmatched bank transactions
-  const unmatchedBankResult = unmatchedBank.filter(tx => !usedBankIds.has(tx.id));
+  const unmatchedBank = bankTransactions.filter(tx => !usedBankIds.has(tx.id));
 
-  return { matched, unmatchedOrders, unmatchedBank: unmatchedBankResult };
+  // Expenses: unmatched negative bank txs that never matched a buy order
+  const expenses = unmatchedBank.filter(tx => tx.is_negative);
+
+  return { matched, unmatchedOrders, unmatchedBank, expenses };
 }
